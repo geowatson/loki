@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"path"
@@ -576,6 +577,25 @@ func (i *Ingester) removeShutdownMarkerFile() {
 
 func (i *Ingester) loop() {
 	defer i.loopDone.Done()
+
+	// Delay the first flush operation by up to 0.8x the flush time period.
+	// This will ensure that multiple ingesters started at the same time do not
+	// flush at the same time. Flushing at the same time can cause concurrently
+	// writing the same chunk to object storage, which in AWS S3 leads to being
+	// rate limited.
+	jitter := rand.Int63n(int64(float64(i.cfg.FlushCheckPeriod.Nanoseconds()) * 0.8))
+	initialDelay := time.NewTimer(time.Duration(jitter))
+	defer initialDelay.Stop()
+
+	level.Debug(util_log.Logger).Log("msg", "sleeping for initial delay before starting periodic flushing", "delay", jitter)
+
+	select {
+	case <-initialDelay.C:
+		// do nothing and continue with flush loop
+	case <-i.loopQuit:
+		// ingester stopped while waiting for initial delay
+		return
+	}
 
 	flushTicker := time.NewTicker(i.cfg.FlushCheckPeriod)
 	defer flushTicker.Stop()
